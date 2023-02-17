@@ -1,0 +1,238 @@
+CREATE TABLE people (
+
+    pid             integer NOT NULL PRIMARY KEY,
+    name            text NOT NULL,
+    personowns      ownshares[]
+
+);
+
+CREATE TABLE companies (
+
+    cid             integer NOT NULL PRIMARY KEY,
+    name            text NOT NULL,
+    totalshares     integer CHECK (totalshares > 0),
+    shareprice      integer CHECK (shareprice > 0),
+    industry        text[] CHECK (array_length(industry, 1) > 0),
+    companyowns     ownshares[],
+    boardheads      integer[]
+
+);
+
+CREATE TYPE ownshares AS (
+
+    cid             integer,
+    sharesowned     integer
+
+);
+
+INSERT INTO companies (cid,name,totalshares,shareprice,industry,companyowns,boardheads) VALUES
+    (1,'QUE',150000,30,'{"Software","Accounting"}','{"(2,10000)","(4,20000)","(8,30000)"}','{3,1,4}'),
+    (2,'RHC',250000,20,'{"Accounting"}','{}','{1,2,5}'),
+    (3,'Alf',10000000,700,'{"Software","Automotive"}','{"(9,-100000)","(4,400000)","(8,100000)"}','{6,7,1}'),
+    (4,'Elgog',10000000,400,'{"Software","Search"}','{"(6,5000)"}','{6,7,5}'),
+    (5,'Tfos',10000000,300,'{"Software","Hardware"}','{"(6,30000)","(7,50000)","(1,200000)"}','{2,5,4}'),
+    (6,'Ohay',180000,50,'{"Search"}','{}','{2,4,8}'),
+    (7,'Gnow',150000,300,'{"Search"}','{}','{2,3,4}'),
+    (8,'Elpa',9000000,300,'{"Software","Hardware"}','{"(5,20000)","(4,30000)"}','{2,3,8}'),
+    (9,'Ydex',5000000,100,'{"Software","Search"}','{}','{6,3,8}');
+
+INSERT INTO people (pid,name,personowns) VALUES
+    (1,'Bill Doe','{"(5,30000)","(8,100000)"}'),
+    (2,'Bill Seth','{"(7,40000)","(4,20000)"}'),
+    (3,'John Smyth','{"(1,20000)","(2,20000)","(5,800000)"}'),
+    (4,'Anne Smyle','{"(2,30000)","(5,40000)","(3,500000)"}'),
+    (5,'Steve Lamp','{"(8,90000)","(1,50000)","(6,50000)","(2,70000)"}'),
+    (6,'May Serge','{"(8,-10000)","(9,-40000)","(3,500000)","(2,40000)"}'),
+    (7,'Bill Public','{"(7,80000)","(4,30000)","(1,30000)","(5,300000)","(2,-9000)"}'),
+    (8,'Muck Lain','{"(2,60000)","(6,-40000)","(9,-80000)","(8,30000)"}');
+
+SELECT c.name AS CompanyName
+FROM
+    companies c,
+    people p,
+    unnest(p.personowns) AS po
+WHERE p.pid = ANY(c.boardheads) AND po.cid = c.cid AND po.sharesowned > 0;
+
+SELECT
+    p.name AS PersonName,
+    sum(c.shareprice * po.sharesowned) AS NetWorth
+FROM
+    companies c,
+    people p,
+    unnest(p.personowns) AS po
+WHERE c.cid = po.cid AND po.sharesowned > 0
+GROUP BY p.name;
+
+SELECT
+    c.name AS CompanyName,
+    p.name AS PersonWithMostShares,
+    MAX(po.sharesowned) AS SharesOwned
+FROM
+    companies c,
+    people p,
+    unnest(p.personowns) AS po
+WHERE
+    p.pid = ANY(c.boardheads) AND
+    c.cid = po.cid AND
+    po.sharesowned > 0
+GROUP BY c.name, p.name;
+
+//First chunk gives pairs of companies with same industry. 42 pairs total
+//Second chunk finds board heads and compares their owned shares
+//Ultimately, subtract any results found in the second from the first
+
+SELECT
+    comp1.name AS DominatingCompany, comp2.name AS DominatedCompany
+FROM
+    companies comp1,
+    companies comp2
+WHERE
+    EXISTS (
+
+        SELECT *
+        FROM
+            unnest(comp1.industry) i1,
+            unnest(comp2.industry) i2
+        WHERE
+            comp1.cid != comp2.cid AND
+            i1 = i2
+    )
+EXCEPT
+SELECT comp1.name, comp2.name
+FROM
+    companies comp1,
+    companies comp2,
+    people p2,
+    unnest(p2.personowns) po2
+WHERE
+    comp1.cid != comp2.cid AND
+    p2.pid = ANY(comp2.boardheads) AND
+    po2.sharesowned > ALL (
+        SELECT po1.sharesowned
+        FROM
+            people p1,
+            unnest(p1.personowns) po1
+        WHERE
+            p1.pid = ANY(comp1.boardheads) AND
+            po1.cid = po2.cid
+    )
+;
+
+//
+
+WITH RECURSIVE
+    PersonDirectControl AS(
+        SELECT
+            p.pid AS pid,
+            c.cid AS cid,
+            (po.sharesowned::decimal / c.totalshares) AS PerOfcidOwned
+        FROM
+            people p,
+            unnest(p.personowns) po,
+            companies c
+        WHERE
+            po.sharesowned > 0 AND
+            c.cid = po.cid
+
+    ),
+    PersonIndirectControl (pid, cid1, cid2, PerOfcid1Owned, PerOfcid2Owned, path) AS(
+        SELECT
+            PDC.pid,
+            c1.cid,
+            c2.cid,
+            PDC.PerOfcidOwned,
+            ((PDC.PerOfcidOwned * co1.sharesowned) / c2.totalshares),
+            ARRAY[c2.cid]
+        FROM
+            PersonDirectControl PDC,
+            companies c1,
+            companies c2,
+            unnest(c1.companyowns) co1
+        WHERE
+            c1.cid = PDC.cid AND
+            c1.cid != c2.cid AND
+            co1.sharesowned > 0 AND
+            c2.cid = co1.cid
+      UNION ALL
+        SELECT
+            PIC.pid,
+            c2.cid,
+            c3.cid,
+            PIC.PerOfcid2Owned,
+            ((PIC.PerOfcid2Owned * co2.sharesowned) / c3.totalshares),
+            path || c3.cid
+        FROM
+            PersonIndirectControl PIC,
+            companies c2,
+            companies c3,
+            unnest(c2.companyowns) co2
+        WHERE
+            c2.cid = PIC.cid2 AND
+            c2.cid != c3.cid AND
+            co2.sharesowned > 0 AND
+            c3.cid = co2.cid AND
+            NOT (c3.cid = ANY(path))
+    ),
+    PersonSumIndirectControl AS(
+        SELECT
+            p.pid AS pid,
+            c.cid AS cid,
+            sum(PIC.PerOfcid2Owned) AS ic
+        FROM
+            PersonIndirectControl PIC,
+            companies c,
+            people p
+        WHERE
+            c.cid = PIC.cid2 AND
+            p.pid = PIC.pid
+        GROUP BY p.pid, c.cid
+    ),
+    PersonDirectAndIndirectControl AS(
+        SELECT
+            p.pid AS pid,
+            c.cid AS cid,
+            (PSIC.ic + PDC.PerOfcidOwned) AS dic
+        FROM
+            people p,
+            companies c,
+            PersonSumIndirectControl PSIC,
+            PersonDirectControl PDC
+        WHERE
+            p.pid = PSIC.pid AND
+            PSIC.pid = PDC.pid AND
+            PSIC.cid = PDC.cid AND
+            c.cid = PSIC.cid
+    ),
+    PersonAllControl (pid, cid, percid) AS(
+        SELECT * FROM PersonDirectControl
+        UNION
+        SELECT * FROM PersonSumIndirectControl
+        UNION
+        SELECT * FROM PersonDirectAndIndirectControl
+    ),
+    PersonMaxControl AS(
+        SELECT
+            PAC.pid AS pid,
+            PAC.cid AS cid,
+            MAX(PAC.percid) AS percid
+        FROM
+            PersonAllControl PAC
+        GROUP BY
+            PAC.pid, PAC.cid
+    ),
+    Query5 AS (
+        SELECT
+            p.name AS PersonName,
+            c.name AS CompanyName,
+            TRUNC(PMC.percid * 100,4) AS Percentage
+        FROM
+            people p,
+            companies c,
+            PersonMaxControl PMC
+        WHERE
+            p.pid = PMC.pid AND
+            c.cid = PMC.cid AND
+            PMC.percid * 100 > 10
+    )
+SELECT * FROM Query5
+;
